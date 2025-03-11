@@ -88,7 +88,26 @@ void ch_mod(char **args) {
     chmod(path, permission);
 }
 
-void process_args(char **args) {
+int is_programa_bin(char *command) {
+    return !strncmp(command, "/bin", 4) ||
+           !strncmp(command, "/usr", 4);
+}
+
+void do_execve(char **args) {
+    pid_t pid = fork(); // Novo processo
+
+    // Processo filho
+    if (pid == 0) {
+        execve(args[0], args, NULL);
+        exit(1); // Se chegou aqui é um erro
+    }
+    // Processo pai (espera filho terminar)
+    else {
+        waitpid(pid, NULL, 0);
+    }
+}
+
+void execute_args(char **args) {
     char *command = args[0];
 
     if (!strcmp(command, "cd")) {
@@ -99,6 +118,12 @@ void process_args(char **args) {
     }
     else if (!strcmp(command, "chmod")) {
         ch_mod(args);
+    }
+    else if (is_programa_bin(command)) {
+        do_execve(args);
+    }
+    else if (!strcmp(command, "bye")) {
+        exit(0);
     }
 }
 
@@ -123,9 +148,11 @@ int main() {
         // Guarda no histórico
         add_history(input);
 
+        // Trata o input e executa o comando correspondente
         char **args = separate_args(input);
-        process_args(args);
+        execute_args(args);
 
+        // Libera memória
         free(args);
         free(input);
         free(prompt);
