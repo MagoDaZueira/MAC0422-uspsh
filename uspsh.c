@@ -6,6 +6,9 @@
 #include <readline/history.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
 
 // Cria um prompt seguindo a formatação desejada ("[name:dir]$ ")
 char *create_prompt(char *hostname, size_t hsize, char *directory, size_t dsize) {
