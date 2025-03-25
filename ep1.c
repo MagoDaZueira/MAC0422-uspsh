@@ -116,6 +116,15 @@ Process *line_to_process(char *line) {
     return p;
 }
 
+int compare_by_t0(const void *a, const void *b) {
+    const Process *process_a = *(const Process **)a;
+    const Process *process_b = *(const Process **)b;
+    
+    if (process_a->t0 < process_b->t0) return -1;
+    if (process_a->t0 > process_b->t0) return 1;
+    return 0;
+}
+
 /******************************************************************
 *************************** FUNÇÃO MAIN **************************/
 int main(int argc, char *argv[]) {
@@ -136,13 +145,18 @@ int main(int argc, char *argv[]) {
     while (fgets(line, MAX_LINE_SIZE, file)) {
         processes[i++] = line_to_process(line);
     }
-    
+
     fclose(file);
 
     for (int i = 0; i < line_amount; i++) {
         printf("%s %d %d %d\n", processes[i]->name, processes[i]->t0, processes[i]->dt, processes[i]->deadline);
     }
 
+    qsort(processes, line_amount, sizeof(Process*), compare_by_t0);
+
+    for (int i = 0; i < line_amount; i++) {
+        printf("%s %d %d %d\n", processes[i]->name, processes[i]->t0, processes[i]->dt, processes[i]->deadline);
+    }
 
     // Queue *q = new_queue(sizeof(int));
 
