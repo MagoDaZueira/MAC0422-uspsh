@@ -2,11 +2,16 @@
 ***************************** INCLUDES ***************************/
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <sys/time.h>
 
 /******************************************************************
 ***************************** DEFINES ****************************/
 #define MAX_LINE_SIZE 128
+#define min(a,b) a < b ? a : b
 
 /******************************************************************
 *********************** IMPLEMENTAÇÃO QUEUE ***********************/
@@ -116,6 +121,7 @@ Process *line_to_process(char *line) {
     return p;
 }
 
+
 int compare_by_t0(const void *a, const void *b) {
     const Process *process_a = *(const Process **)a;
     const Process *process_b = *(const Process **)b;
@@ -123,6 +129,91 @@ int compare_by_t0(const void *a, const void *b) {
     if (process_a->t0 < process_b->t0) return -1;
     if (process_a->t0 > process_b->t0) return 1;
     return 0;
+}
+/******************************************************************
+************************ PROCESSOS/THREADS ***********************/
+char* active_name;
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+void do_work(double seconds) {
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
+    
+    do {
+        gettimeofday(&end, NULL);
+    } while ((end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6 < seconds);
+}
+
+void* execute(void* arg) {
+    Process* p = (Process*)arg;
+
+    double time = 0;
+    struct timeval start, end;
+
+    while (time < p->dt) {
+        pthread_mutex_lock(&lock);
+        
+        // Wait until this thread is active
+        while (strcmp(active_name, p->name)) {
+            pthread_cond_wait(&cond, &lock);
+        }
+        pthread_mutex_unlock(&lock);
+
+        // Measure only execution time
+        gettimeofday(&start, NULL);
+        
+        do_work(0.001);
+
+        gettimeofday(&end, NULL);
+        
+        // Update elapsed time
+        time += (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+    }
+
+    return NULL;
+}
+
+/******************************************************************
+************************** ESCALONADORES *************************/
+
+void fcfs(FILE *file, Process **processes, int n) {
+    double time = 0;
+    struct timeval start, end;
+
+    int on_time; double tr;
+
+    for (int i = 0; i < n; i++) {
+        if (time < processes[i]->t0) {
+            sleep(processes[i]->t0 - time);
+            time = processes[i]->t0;
+        }
+
+        pthread_t thread;
+        active_name = processes[i]->name;
+
+        Process* process_copy = malloc(sizeof(Process));
+        *process_copy = *processes[i];
+
+        gettimeofday(&start, NULL);
+
+        pthread_create(&thread, NULL, execute, process_copy); 
+        pthread_join(thread, NULL);
+
+        pthread_cond_broadcast(&cond);
+
+        gettimeofday(&end, NULL);
+        time += (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+
+        tr = time - processes[i]->t0;
+        on_time = time <= processes[i]->deadline;
+
+        fprintf(file, "%s %.4f %.4f %d\n", processes[i]->name, tr, time, on_time);
+    }
+
+    fprintf(file, "0\n");
+
+    return;
 }
 
 /******************************************************************
@@ -134,43 +225,34 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *file = fopen(argv[2], "r");
-    int line_amount = count_lines(file);
-    fseek(file, 0, SEEK_SET);
+    FILE *file_in = fopen(argv[2], "r");
+    int line_amount = count_lines(file_in);
+    fseek(file_in, 0, SEEK_SET);
 
     Process **processes = malloc(line_amount * sizeof(Process*));
     char *line = malloc(MAX_LINE_SIZE * sizeof(char));
 
     int i = 0;
-    while (fgets(line, MAX_LINE_SIZE, file)) {
+    while (fgets(line, MAX_LINE_SIZE, file_in)) {
         processes[i++] = line_to_process(line);
     }
 
-    fclose(file);
-
-    for (int i = 0; i < line_amount; i++) {
-        printf("%s %d %d %d\n", processes[i]->name, processes[i]->t0, processes[i]->dt, processes[i]->deadline);
-    }
-
+    fclose(file_in);
     qsort(processes, line_amount, sizeof(Process*), compare_by_t0);
 
-    for (int i = 0; i < line_amount; i++) {
-        printf("%s %d %d %d\n", processes[i]->name, processes[i]->t0, processes[i]->dt, processes[i]->deadline);
+    FILE *file_out = fopen(argv[3], "a");
+
+    int scheduler_mode = atoi(argv[1]);
+    switch (scheduler_mode) {
+        case 1:
+            fcfs(file_out, processes, line_amount);
+            break;
+        default:
+            printf("O primeiro argumento <numero do escalonador> deve ser 1, 2 ou 3\n");
+            return 1;
     }
 
-    // Queue *q = new_queue(sizeof(int));
-
-    // int x = 10, y = 4;
-    // enqueue(q, &x);
-    // enqueue(q, &y);
-
-    // while (!is_queue_empty(q)) {
-    //     int num = *(int*) front(q);
-    //     printf("Front: %d\n", num);
-    //     dequeue(q);
-    // }
-
-    // free(q);
+    fclose(file_out);
 
     return 0;
 }
