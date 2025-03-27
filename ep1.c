@@ -136,6 +136,8 @@ char* active_name;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
+Queue* finished_threads;
+
 void do_work(double seconds) {
     struct timeval start, end;
     gettimeofday(&start, NULL);
@@ -145,32 +147,30 @@ void do_work(double seconds) {
     } while ((end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6 < seconds);
 }
 
+int running = 0;
+
 void* execute(void* arg) {
     Process* p = (Process*)arg;
+    int time = 0;
 
-    double time = 0;
-    struct timeval start, end;
+    // double time_lim = p->dt - 0.5;
+    double time_lim = p->dt;
 
-    while (time < p->dt) {
+    while (time < time_lim) {
         pthread_mutex_lock(&lock);
-        
-        // Wait until this thread is active
         while (strcmp(active_name, p->name)) {
             pthread_cond_wait(&cond, &lock);
         }
         pthread_mutex_unlock(&lock);
-
-        // Measure only execution time
-        gettimeofday(&start, NULL);
         
-        do_work(0.001);
-
-        gettimeofday(&end, NULL);
-        
-        // Update elapsed time
-        time += (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+        do_work(1);
+        time++;
     }
 
+    pthread_mutex_lock(&lock);
+    enqueue(finished_threads, p);
+    running--;
+    pthread_mutex_unlock(&lock);
     return NULL;
 }
 
@@ -178,37 +178,48 @@ void* execute(void* arg) {
 ************************** ESCALONADORES *************************/
 
 void fcfs(FILE *file, Process **processes, int n) {
-    double time = 0;
-    struct timeval start, end;
+    Queue *q = new_queue(sizeof(Process));
+    finished_threads = new_queue(sizeof(Process));
 
-    int on_time; double tr;
+    int time = 0;
+    int on_time, tr;
 
-    for (int i = 0; i < n; i++) {
-        if (time < processes[i]->t0) {
-            sleep(processes[i]->t0 - time);
-            time = processes[i]->t0;
+    int i = 0;
+    while (i < n || !is_queue_empty(q) || running > 0) {
+        if (i < n && time >= processes[i]->t0) {
+            enqueue(q, processes[i]);
+            i++;
         }
 
-        pthread_t thread;
-        active_name = processes[i]->name;
+        if (!running && !is_queue_empty(q)) {
+            pthread_t thread;
 
-        Process* process_copy = malloc(sizeof(Process));
-        *process_copy = *processes[i];
+            Process* process_copy = malloc(sizeof(Process));
+            *process_copy = *(Process*)front(q);
+            active_name = process_copy->name;
+            pthread_create(&thread, NULL, execute, process_copy); 
 
-        gettimeofday(&start, NULL);
+            dequeue(q);
 
-        pthread_create(&thread, NULL, execute, process_copy); 
-        pthread_join(thread, NULL);
+            pthread_mutex_lock(&lock);
+            running++;
+            pthread_mutex_unlock(&lock);
 
-        pthread_cond_broadcast(&cond);
+            pthread_cond_broadcast(&cond);
+        }
 
-        gettimeofday(&end, NULL);
-        time += (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+        sleep(1);
+        time++;
 
-        tr = time - processes[i]->t0;
-        on_time = time <= processes[i]->deadline;
-
-        fprintf(file, "%s %.4f %.4f %d\n", processes[i]->name, tr, time, on_time);
+        pthread_mutex_lock(&lock);
+        while (!is_queue_empty(finished_threads)) {
+            Process* p = front(finished_threads);
+            tr = time - p->t0;
+            on_time = time <= p->deadline;
+            fprintf(file, "%s %d %d %d\n", p->name, tr, time, on_time);
+            dequeue(finished_threads);
+        }
+        pthread_mutex_unlock(&lock);
     }
 
     fprintf(file, "0\n");
