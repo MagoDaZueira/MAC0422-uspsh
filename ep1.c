@@ -1,5 +1,6 @@
 /******************************************************************
 ***************************** INCLUDES ***************************/
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -7,10 +8,12 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sched.h>
 
 /******************************************************************
 ***************************** DEFINES ****************************/
 #define MAX_LINE_SIZE 128
+#define MAX_CORES 3
 #define min(a,b) a < b ? a : b
 
 /******************************************************************
@@ -132,11 +135,36 @@ int compare_by_t0(const void *a, const void *b) {
 }
 /******************************************************************
 ************************ PROCESSOS/THREADS ***********************/
-char* active_name;
+char* active_threads[MAX_CORES];
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-
 Queue* finished_threads;
+
+int is_active_thread(char *name) {
+    for (int i = 0; i < MAX_CORES; i++) {
+        if (active_threads[i] && !strcmp(active_threads[i], name))
+            return 1;
+    }
+    return 0;
+}
+
+void set_active_thread(char *name) {
+    for (int i = 0; i < MAX_CORES; i++) {
+        if (active_threads[i] == NULL) {
+            active_threads[i] = name;
+            return;
+        }
+    }
+}
+
+void remove_active_thread(char *name) {
+    for (int i = 0; i < MAX_CORES; i++) {
+        if (active_threads[i] && !strcmp(active_threads[i], name)) {
+            active_threads[i] = NULL;
+            return;
+        }
+    }
+}
 
 void do_work(double seconds) {
     struct timeval start, end;
@@ -154,14 +182,14 @@ void* execute(void* arg) {
     int time = 0;
 
     // double time_lim = p->dt - 0.5;
-    double time_lim = p->dt;
+    int time_lim = p->dt;
 
     while (time < time_lim) {
-        pthread_mutex_lock(&lock);
-        while (strcmp(active_name, p->name)) {
+        // pthread_mutex_lock(&lock);
+        while (!is_active_thread(p->name)) {
             pthread_cond_wait(&cond, &lock);
         }
-        pthread_mutex_unlock(&lock);
+        // pthread_mutex_unlock(&lock);
         
         do_work(1);
         time++;
@@ -169,6 +197,7 @@ void* execute(void* arg) {
 
     pthread_mutex_lock(&lock);
     enqueue(finished_threads, p);
+    remove_active_thread(p->name);
     running--;
     pthread_mutex_unlock(&lock);
     return NULL;
@@ -176,6 +205,7 @@ void* execute(void* arg) {
 
 /******************************************************************
 ************************** ESCALONADORES *************************/
+cpu_set_t cores[MAX_CORES];
 
 void fcfs(FILE *file, Process **processes, int n) {
     Queue *q = new_queue(sizeof(Process));
@@ -184,29 +214,35 @@ void fcfs(FILE *file, Process **processes, int n) {
     int time = 0;
     int on_time, tr;
 
+    int core_i = 0;
     int i = 0;
+
     while (i < n || !is_queue_empty(q) || running > 0) {
         if (i < n && time >= processes[i]->t0) {
             enqueue(q, processes[i]);
             i++;
         }
 
-        if (!running && !is_queue_empty(q)) {
+        pthread_mutex_lock(&lock);
+        while (running < MAX_CORES && !is_queue_empty(q)) {
             pthread_t thread;
+            // pthread_mutex_lock(&lock);
 
             Process* process_copy = malloc(sizeof(Process));
             *process_copy = *(Process*)front(q);
-            active_name = process_copy->name;
+            set_active_thread(process_copy->name);
             pthread_create(&thread, NULL, execute, process_copy); 
+            
+            pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
+            core_i = (core_i + 1) % MAX_CORES;
 
             dequeue(q);
-
-            pthread_mutex_lock(&lock);
             running++;
-            pthread_mutex_unlock(&lock);
 
+            // pthread_mutex_unlock(&lock);
             pthread_cond_broadcast(&cond);
         }
+        pthread_mutex_unlock(&lock);
 
         sleep(1);
         time++;
@@ -252,6 +288,13 @@ int main(int argc, char *argv[]) {
     qsort(processes, line_amount, sizeof(Process*), compare_by_t0);
 
     FILE *file_out = fopen(argv[3], "a");
+
+    for (int i = 0; i < MAX_CORES; i++) active_threads[i] = NULL;
+
+    for (int i = 0; i < MAX_CORES; i++) {
+        CPU_ZERO(&cores[i]);
+        CPU_SET(i, &cores[i]);
+    }
 
     int scheduler_mode = atoi(argv[1]);
     switch (scheduler_mode) {
