@@ -8,12 +8,11 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/time.h>
-#include <sched.h>
 
 /******************************************************************
 ***************************** DEFINES ****************************/
 #define MAX_LINE_SIZE 128
-#define MAX_CORES 3
+// #define MAX_CORES 3
 #define min(a,b) a < b ? a : b
 
 /******************************************************************
@@ -27,12 +26,14 @@ typedef struct {
     Node *front;
     Node *back;
     size_t data_size;
+    int size;
 } Queue;
 
 Queue* new_queue(size_t data_size) {
     Queue *q = (Queue*)malloc(sizeof(Queue));
     q->front = q->back = NULL;
     q->data_size = data_size;
+    q->size = 0;
     return q;
 }
 
@@ -53,6 +54,7 @@ void enqueue(Queue *q, void *data) {
         q->back->next = new_node;
     }
     q->back = new_node;
+    q->size++;
 }
 
 void dequeue(Queue *q) {
@@ -67,6 +69,7 @@ void dequeue(Queue *q) {
 
     free(temp->data);
     free(temp);
+    q->size--;
 }
 
 void* front(Queue *q) {
@@ -135,10 +138,17 @@ int compare_by_t0(const void *a, const void *b) {
 }
 /******************************************************************
 ************************ PROCESSOS/THREADS ***********************/
-char* active_threads[MAX_CORES];
+int MAX_CORES;
+char** active_threads;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t thread_cond = PTHREAD_COND_INITIALIZER;  // For workers to wait
+pthread_cond_t scheduler_cond = PTHREAD_COND_INITIALIZER; // For scheduler to wait
 Queue* finished_threads;
+
+int running = 0;
+int threads_ready = 0; // Tracks waiting threads
+int scheduler_waiting = 0; // Ensures FCFS blocks until all threads finish a cycle
 
 int is_active_thread(char *name) {
     for (int i = 0; i < MAX_CORES; i++) {
@@ -175,97 +185,116 @@ void do_work(double seconds) {
     } while ((end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6 < seconds);
 }
 
-int running = 0;
-
 void* execute(void* arg) {
     Process* p = (Process*)arg;
     int time = 0;
-
-    // double time_lim = p->dt - 0.5;
     int time_lim = p->dt;
 
     while (time < time_lim) {
-        // pthread_mutex_lock(&lock);
+        pthread_mutex_lock(&lock);
         while (!is_active_thread(p->name)) {
-            pthread_cond_wait(&cond, &lock);
+            pthread_cond_wait(&thread_cond, &lock);
         }
-        // pthread_mutex_unlock(&lock);
-        
-        do_work(1);
+        pthread_mutex_unlock(&lock);
+
+        do_work(0.5);
+
+        pthread_mutex_lock(&lock);
         time++;
+        if (time < time_lim) threads_ready++;
+
+        if (threads_ready >= running) {
+            pthread_cond_signal(&scheduler_cond);
+        }
+
+        while (threads_ready > 0 && time < time_lim) {
+            pthread_cond_wait(&thread_cond, &lock);
+        }
+        pthread_mutex_unlock(&lock);
     }
 
+    // A thread acabou
     pthread_mutex_lock(&lock);
     enqueue(finished_threads, p);
     remove_active_thread(p->name);
     running--;
+    pthread_cond_signal(&scheduler_cond);
     pthread_mutex_unlock(&lock);
+
+
     return NULL;
 }
 
+
 /******************************************************************
-************************** ESCALONADORES *************************/
-cpu_set_t cores[MAX_CORES];
+************************** FCFS SCHEDULER *************************/
+cpu_set_t* cores;
 
 void fcfs(FILE *file, Process **processes, int n) {
     Queue *q = new_queue(sizeof(Process));
     finished_threads = new_queue(sizeof(Process));
 
     int time = 0;
-    int on_time, tr;
-
     int core_i = 0;
     int i = 0;
+    threads_ready = 0;
 
-    while (i < n || !is_queue_empty(q) || running > 0) {
-        if (i < n && time >= processes[i]->t0) {
+    while (i < n || !is_queue_empty(q) || running > 0 || !is_queue_empty(finished_threads)) {
+        // Adiciona processos que chegaram agora a fila de prontos
+        while (i < n && time >= processes[i]->t0) {
             enqueue(q, processes[i]);
             i++;
         }
 
+        // Inicia processos da fila de prontos
         pthread_mutex_lock(&lock);
         while (running < MAX_CORES && !is_queue_empty(q)) {
             pthread_t thread;
-            // pthread_mutex_lock(&lock);
-
             Process* process_copy = malloc(sizeof(Process));
             *process_copy = *(Process*)front(q);
             set_active_thread(process_copy->name);
-            pthread_create(&thread, NULL, execute, process_copy); 
-            
+
+            pthread_create(&thread, NULL, execute, process_copy);
             pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
             core_i = (core_i + 1) % MAX_CORES;
-
             dequeue(q);
             running++;
-
-            // pthread_mutex_unlock(&lock);
-            pthread_cond_broadcast(&cond);
         }
         pthread_mutex_unlock(&lock);
-
-        sleep(1);
-        time++;
-
+        
+        // Espera todas as threads acabarem o ciclo
+        pthread_mutex_lock(&lock);
+        pthread_cond_broadcast(&thread_cond);
+        while (threads_ready < running) {
+            pthread_cond_wait(&scheduler_cond, &lock);
+        }
+        threads_ready = 0;
+        pthread_mutex_unlock(&lock);
+        
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
-            tr = time - p->t0;
-            on_time = time <= p->deadline;
-            fprintf(file, "%s %d %d %d\n", p->name, tr, time, on_time);
+            int tr = time - p->t0 + 1;
+            int on_time = (time + 1 <= p->deadline);
+            fprintf(file, "%s %d %d %d\n", p->name, tr, time + 1, on_time);
             dequeue(finished_threads);
         }
         pthread_mutex_unlock(&lock);
+
+        time++;
     }
 
     fprintf(file, "0\n");
-
-    return;
 }
+
 
 /******************************************************************
 *************************** FUNÇÃO MAIN **************************/
 int main(int argc, char *argv[]) {
+
+    MAX_CORES = sysconf(_SC_NPROCESSORS_ONLN);
+    active_threads = malloc(MAX_CORES * sizeof(char*));
+    cores = malloc(MAX_CORES * sizeof(cpu_set_t));
 
     if (argc != 4) {
         printf("Uso correto: ep1 <numero do escalonador> <trace entrada> <trace saida>\n");
