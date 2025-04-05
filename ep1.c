@@ -14,6 +14,7 @@
 #define MAX_LINE_SIZE 128
 // #define MAX_CORES 3
 #define min(a,b) a < b ? a : b
+#define max(a,b) a > b ? a : b
 
 /******************************************************************
 *********************** IMPLEMENTAÇÃO QUEUE ***********************/
@@ -25,14 +26,12 @@ typedef struct Node {
 typedef struct {
     Node *front;
     Node *back;
-    size_t data_size;
     int size;
 } Queue;
 
-Queue* new_queue(size_t data_size) {
+Queue* new_queue() {
     Queue *q = (Queue*)malloc(sizeof(Queue));
     q->front = q->back = NULL;
-    q->data_size = data_size;
     q->size = 0;
     return q;
 }
@@ -43,14 +42,12 @@ int is_queue_empty(Queue *q) {
 
 void enqueue(Queue *q, void *data) {
     Node *new_node = (Node*)malloc(sizeof(Node));
-    new_node->data = malloc(q->data_size);
-    memcpy(new_node->data, data, q->data_size);
+    new_node->data = data;
     new_node->next = NULL;
 
     if (is_queue_empty(q)) {
         q->front = new_node;
-    }
-    else {
+    } else {
         q->back->next = new_node;
     }
     q->back = new_node;
@@ -59,7 +56,7 @@ void enqueue(Queue *q, void *data) {
 
 void dequeue(Queue *q) {
     if (is_queue_empty(q)) return;
-    
+
     Node* temp = q->front;
     q->front = q->front->next;
 
@@ -67,7 +64,6 @@ void dequeue(Queue *q) {
         q->back = NULL;
     }
 
-    free(temp->data);
     free(temp);
     q->size--;
 }
@@ -170,6 +166,7 @@ typedef struct Process {
     int remaining;
     int deadline;
     int core_id;
+    int quantum;
 } Process;
 
 int count_lines(FILE *file) {
@@ -235,15 +232,15 @@ int compare_by_dt(const void *a, const void *b) {
 
 /******************************************************************
  ************************ PROCESSOS/THREADS ***********************/
- int MAX_CORES;
- char** active_names;
- Process** active_threads;
- pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
- pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
- pthread_cond_t thread_cond = PTHREAD_COND_INITIALIZER;
- pthread_cond_t scheduler_cond = PTHREAD_COND_INITIALIZER;
- Queue* finished_threads;
- int* core_dt;
+int MAX_CORES;
+char** active_names;
+Process** active_threads;
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t thread_cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t scheduler_cond = PTHREAD_COND_INITIALIZER;
+Queue* finished_threads;
+int* core_dt;
 
 int running = 0;
 int threads_ready = 0;
@@ -344,9 +341,13 @@ void* execute(void* arg) {
 ************************** ESCALONADORES *************************/
 cpu_set_t* cores;
 
+int calculate_quantum(Process* p) {
+    return max(1, ((p->dt * 4) / (p->deadline - p->t0)));
+}
+
 void fcfs(FILE *file, Process **processes, int n) {
-    Queue *q = new_queue(sizeof(Process));
-    finished_threads = new_queue(sizeof(Process));
+    Queue *q = new_queue(sizeof(Process*));
+    finished_threads = new_queue(sizeof(Process*));
 
     int time = 0;
     int core_i = 0;
@@ -364,16 +365,15 @@ void fcfs(FILE *file, Process **processes, int n) {
         pthread_mutex_lock(&lock);
         while (running < MAX_CORES && !is_queue_empty(q)) {
             pthread_t thread;
-            Process* process_copy = malloc(sizeof(Process));
-            *process_copy = *(Process*)front(q);
-            set_active_thread(process_copy->name);
+            Process *candidate = front(q);
+            set_active_thread(candidate->name);
 
             core_i = laziest_core();
-            core_dt[core_i] += process_copy->dt;
-            process_copy->core_id = core_i;
-            process_copy->remaining = process_copy->dt;
+            core_dt[core_i] += candidate->dt;
+            candidate->core_id = core_i;
+            candidate->remaining = candidate->dt;
 
-            pthread_create(&thread, NULL, execute, process_copy);
+            pthread_create(&thread, NULL, execute, candidate);
             pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
 
             dequeue(q);
@@ -410,7 +410,7 @@ void srtn(FILE *file, Process **processes, int n) {
     MinPQ *pq_array[MAX_CORES];
     for (int i = 0; i < MAX_CORES; i++) pq_array[i] = new_pq(8, compare_by_dt);
 
-    finished_threads = new_queue(sizeof(Process));
+    finished_threads = new_queue(sizeof(Process*));
 
     int time = 0;
     int core_i = 0;
@@ -492,6 +492,97 @@ void srtn(FILE *file, Process **processes, int n) {
     fprintf(file, "%d\n", preemptions);
 }
 
+void priority(FILE *file, Process **processes, int n) {
+    Queue *queues[MAX_CORES];
+    for (int i = 0; i < MAX_CORES; i++) queues[i] = new_queue(sizeof(Process*));
+
+    finished_threads = new_queue(sizeof(Process));
+
+    int time = 0;
+    int core_i = 0;
+    int i = 0;
+    threads_ready = 0;
+
+    int preemptions = 0;
+    int all_queues_empty = 0;
+
+    while (i < n || running > 0 || !is_queue_empty(finished_threads) || !all_queues_empty) {
+        // Adiciona processos que chegaram agora a fila de prontos
+        pthread_mutex_lock(&lock);
+        while (i < n && time >= processes[i]->t0) {
+            pthread_t thread;
+            core_i = laziest_core();
+            core_dt[core_i] += processes[i]->dt;
+            processes[i]->core_id = core_i;
+            processes[i]->remaining = processes[i]->dt;
+            processes[i]->quantum = calculate_quantum(processes[i]);
+
+            pthread_create(&thread, NULL, execute, processes[i]);
+            pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
+
+            enqueue(queues[core_i], processes[i]);
+            
+            i++;
+        }
+
+        for (int i = 0; i < MAX_CORES; i++) {
+            if (active_threads[i] == NULL && !is_queue_empty(queues[i])) {
+                Process* candidate = front(queues[i]);
+                candidate->remaining = candidate->quantum;
+                active_names[i] = candidate->name;
+                active_threads[i] = candidate;
+                
+                dequeue(queues[i]);
+                running++;
+            }
+        }
+
+        for (int i = 0; i < MAX_CORES; i++) {
+            if (!is_queue_empty(queues[i]) && active_threads[i] != NULL && active_threads[i]->remaining <= 0) {
+                enqueue(queues[i], active_threads[i]);
+                Process* candidate = front(queues[i]);
+                active_threads[i] = candidate;
+                active_names[i] = candidate->name;
+                candidate->remaining = candidate->quantum;
+                dequeue(queues[i]);
+                preemptions++;
+            }
+        }
+
+        pthread_mutex_unlock(&lock);
+        
+        // Espera todas as threads acabarem o ciclo
+        pthread_mutex_lock(&lock);
+        pthread_cond_broadcast(&thread_cond);
+        while (threads_ready < running) {
+            pthread_cond_wait(&scheduler_cond, &lock);
+        }
+        threads_ready = 0;
+        pthread_mutex_unlock(&lock);
+        
+        pthread_mutex_lock(&lock);
+        while (!is_queue_empty(finished_threads)) {
+            Process* p = front(finished_threads);
+            int tr = time - p->t0 + 1;
+            int on_time = (time + 1 <= p->deadline);
+            fprintf(file, "%s %d %d %d\n", p->name, tr, time + 1, on_time);
+            dequeue(finished_threads);
+        }
+        pthread_mutex_unlock(&lock);
+
+        time++;
+        
+        all_queues_empty = 1;
+        for (int i = 0; i < MAX_CORES; i++) {
+            if (!is_queue_empty(queues[i]) || active_threads[i] != NULL) {
+                all_queues_empty = 0;
+                break;
+            }
+        }
+    }
+
+    fprintf(file, "%d\n", preemptions);
+}
 
 /******************************************************************
 *************************** FUNÇÃO MAIN **************************/
@@ -543,6 +634,9 @@ int main(int argc, char *argv[]) {
             break;
         case 2:
             srtn(file_out, processes, line_amount);
+            break;
+        case 3:
+            priority(file_out, processes, line_amount);
             break;
         default:
             printf("O primeiro argumento <numero do escalonador> deve ser 1, 2 ou 3\n");
