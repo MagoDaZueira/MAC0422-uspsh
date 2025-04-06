@@ -11,8 +11,8 @@
 
 /******************************************************************
 ***************************** DEFINES ****************************/
-#define MAX_LINE_SIZE 128
-// #define MAX_CORES 3
+#define MAX_LINE_SIZE 128 // Tamanho maximo de uma linha do arquivo de entrada
+#define TIME_WORKING 1    // Tempo em segundos pelo qual um processo deve trabalhar, a cada segundo
 #define min(a,b) a < b ? a : b
 #define max(a,b) a > b ? a : b
 
@@ -160,15 +160,16 @@ void resize(MinPQ* pq, int capacity) {
 /******************************************************************
 ************************** UTILITÁRIOS ***************************/
 typedef struct Process {
-    char *name;
-    int t0;
-    int dt;
-    int remaining;
-    int deadline;
-    int core_id;
-    int quantum;
+    char *name;     // Nome do processo
+    int t0;         // Tempo de chegada
+    int dt;         // Tempo de execucao
+    int remaining;  // Tempo restante (de um quantum ou da execucao total)
+    int deadline;   // Tempo limite ideal
+    int core_id;    // Nucleo ao qual a thread esta atribuida
+    int quantum;    // Intervalo de tempo alocado no escalonamento por prioridade
 } Process;
 
+// Conta as linhas de um arquivo
 int count_lines(FILE *file) {
     int count = 0;
     char ch;
@@ -184,6 +185,8 @@ int count_lines(FILE *file) {
     return count;
 }
 
+// Transforma uma linha do arquivo em uma instancia de Process
+// Supoe formatacao correta da linha
 Process *line_to_process(char *line) {
     char **items;
     char *token;
@@ -201,7 +204,6 @@ Process *line_to_process(char *line) {
     
     // Cria um processo com os dados obtidos
     Process *p = malloc(sizeof(Process));
-
     p->name = malloc(strlen(items[0]) + 1);
     strcpy(p->name, items[0]);
     p->t0 = atoi(items[1]);
@@ -211,7 +213,7 @@ Process *line_to_process(char *line) {
     return p;
 }
 
-
+// Comparador de processos com base em t0
 int compare_by_t0(const void *a, const void *b) {
     const Process *process_a = *(const Process **)a;
     const Process *process_b = *(const Process **)b;
@@ -221,6 +223,7 @@ int compare_by_t0(const void *a, const void *b) {
     return 0;
 }
 
+// Comparador de processos com base em dt
 int compare_by_dt(const void *a, const void *b) {
     const Process *process_a = (const Process *)a;
     const Process *process_b = (const Process *)b;
@@ -232,21 +235,25 @@ int compare_by_dt(const void *a, const void *b) {
 
 /******************************************************************
  ************************ PROCESSOS/THREADS ***********************/
-int MAX_CORES;
-Process** active_threads;
+int MAX_CORES;            // Numero de cores ativos da maquina
+Process** active_threads; // Vetor que guarda quais threads estao rodando
+int* core_dt;             // Vetor com a soma dos tempos restantes das threads de um core 
+Queue* finished_threads;  // Threads que finalizaram sua execucao, a serem imprimidas
+
+// Controladores de threads
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 pthread_cond_t thread_cond = PTHREAD_COND_INITIALIZER;
 pthread_cond_t scheduler_cond = PTHREAD_COND_INITIALIZER;
-Queue* finished_threads;
-int* core_dt;
 
-int running = 0;
-int threads_ready = 0;
+// Variaveis para controle do escalonador e sincronizacao
+int running = 0;       // Qtde de threads atualmente rodando
+int threads_ready = 0; // Qtde de threads que finalizaram um ciclo de trabalho
 
+// Identifica o nucleo com menor carga de trabalho
 int laziest_core() {
-    int smallest_dt = 10000;
-    int core_id = -1;
+    int smallest_dt = 10000; // Menor carga atual (inicializada arbitrariamente grande)
+    int core_id = -1;        // Core com a tal menor carga
     for (int i = 0; i < MAX_CORES; i++) {
         if (core_dt[i] < smallest_dt) {
             smallest_dt = core_dt[i];
@@ -256,6 +263,7 @@ int laziest_core() {
     return core_id;
 }
 
+// Realiza operacoes inuteis por um intervalo de tempo especificado
 void do_work(double seconds) {
     struct timeval start, end;
     gettimeofday(&start, NULL);
@@ -265,31 +273,39 @@ void do_work(double seconds) {
     } while ((end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6 < seconds);
 }
 
+// Funcao principal das threads
 void* execute(void* arg) {
+    // Obtem o processo correspondente pelo parametro
     Process* p = (Process*)arg;
-    int time = 0;
-    int time_lim = p->dt;
 
-    while (time < time_lim) {
+    // Loop principal da funcao, dura p->dt segundos
+    int time = 0; // Tempo local
+    while (time < p->dt) {
+
+        // Verifica se esta thread esta ativa
         pthread_mutex_lock(&lock);
         while (p != active_threads[p->core_id]) {
-            pthread_cond_wait(&thread_cond, &lock);
+            pthread_cond_wait(&thread_cond, &lock); // Thread pausa enquanto nao estiver ativa
         }
         pthread_mutex_unlock(&lock);
 
-        do_work(0.5);
+        do_work(TIME_WORKING); // Trabalho inutil por 1 segundo
 
+        // Apos trabalhar, altera as variaveis necessarias
+        // e sincroniza com as demais threads 
         pthread_mutex_lock(&lock);
         core_dt[p->core_id]--;
         p->remaining--;
         time++;
-        if (time < time_lim) threads_ready++;
-
+        if (time < p->dt) threads_ready++;
+        
+        // Todas as threads chegaram aqui, sinaliza o escalonador
         if (threads_ready >= running) {
             pthread_cond_signal(&scheduler_cond);
         }
 
-        while (threads_ready > 0 && time < time_lim) {
+        // Threads esperam ate o escalonador sinalizar
+        while (threads_ready > 0 && time < p->dt) {
             pthread_cond_wait(&thread_cond, &lock);
         }
         pthread_mutex_unlock(&lock);
@@ -300,7 +316,7 @@ void* execute(void* arg) {
     enqueue(finished_threads, p);
     active_threads[p->core_id] = NULL;
     running--;
-    pthread_cond_signal(&scheduler_cond);
+    pthread_cond_signal(&scheduler_cond); // Avisa o escalonador (evita deadlock)
     pthread_mutex_unlock(&lock);
 
     return NULL;
@@ -309,43 +325,52 @@ void* execute(void* arg) {
 
 /******************************************************************
 ************************** ESCALONADORES *************************/
-cpu_set_t* cores;
+cpu_set_t* cores; // Vetor com referencias aos nucleos da maquina
 
+// Formula arbitraria para definir o quantum de um processo
 int calculate_quantum(Process* p) {
     return max(1, ((p->dt * 4) / (p->deadline - p->t0)));
 }
 
+// Escalonador 1: FCFS
 void fcfs(FILE *file, Process **processes, int n) {
-    Queue *q = new_queue(sizeof(Process*));
+    // Fila de prontos compartilhada por todos os cores
+    Queue *ready = new_queue(sizeof(Process*));
 
-    int time = 0;
-    int core_i = 0;
-    int i = 0;
+    // Inicializa variaveis de controle do escalonador
+    int time = 0;   // Tempo da simulacao
+    int core_i = 0; // Indice relativo ao core ao qual um processo sera atribuido
+    int i = 0;      // Indice atual do vetor de processos
     threads_ready = 0;
 
-    while (i < n || !is_queue_empty(q) || running > 0 || !is_queue_empty(finished_threads)) {
+    // Loop principal do escalonador
+    while (i < n || !is_queue_empty(ready) || running > 0 || !is_queue_empty(finished_threads)) {
         // Adiciona processos que chegaram agora a fila de prontos
         while (i < n && time >= processes[i]->t0) {
-            enqueue(q, processes[i]);
-            i++;
+            enqueue(ready, processes[i]);
+            i++; // Passa para o próximo processo do vetor inicial
         }
 
         // Inicia processos da fila de prontos
         pthread_mutex_lock(&lock);
-        while (running < MAX_CORES && !is_queue_empty(q)) {
-            pthread_t thread;
-            Process *candidate = front(q);
-
+        while (running < MAX_CORES && !is_queue_empty(ready)) {
+            // Proximo processo na ordem de chegada
+            Process *candidate = front(ready);
+            
+            // Seleciona o core com menos carga e atribui valores a variaveis relacionadas
             core_i = laziest_core();
             core_dt[core_i] += candidate->dt;
             candidate->core_id = core_i;
             candidate->remaining = candidate->dt;
             active_threads[core_i] = candidate;
-
+            
+            // Criação da thread e atribuição ao core
+            pthread_t thread;
             pthread_create(&thread, NULL, execute, candidate);
             pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
 
-            dequeue(q);
+            // Retira o processo da fila de prontos e o considera como "rodando"
+            dequeue(ready);
             running++;
         }
         pthread_mutex_unlock(&lock);
@@ -359,8 +384,9 @@ void fcfs(FILE *file, Process **processes, int n) {
         threads_ready = 0;
         pthread_mutex_unlock(&lock);
         
-        time++;
+        time++; // Tempo que as threads gastaram acima
 
+        // Caso algum processo tenha finalizado, o imprime na formatação correta
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
@@ -372,56 +398,67 @@ void fcfs(FILE *file, Process **processes, int n) {
         pthread_mutex_unlock(&lock);
     }
 
+    // Sabemos que nao haverao preempcoes no FCFS, ultima linha contera 0
     fprintf(file, "0\n");
 }
 
+// Escalonador 2: SRTN
 void srtn(FILE *file, Process **processes, int n) {
+    // Vetor de filas de prioridade
+    // Cada fila é a fila de prontos de um dado nucleo,
+    // Onde o proximo processo é aquele de menor tempo de execução
     MinPQ *pq_array[MAX_CORES];
     for (int i = 0; i < MAX_CORES; i++) pq_array[i] = new_pq(8, compare_by_dt);
 
-    int time = 0;
-    int core_i = 0;
-    int i = 0;
+    // Inicializa variaveis de controle do escalonador
+    int time = 0;             // Tempo da simulacao
+    int core_i = 0;           // Indice relativo ao core ao qual um processo sera atribuido
+    int i = 0;                // Indice atual do vetor de processos
+    int preemptions = 0;      // Conta quantas preempcoes houveram
+    int all_queues_empty = 0; // Indica se todas as filas de pronto estao vazias
     threads_ready = 0;
 
-    int preemptions = 0;
-    int all_queues_empty = 0;
-
+    // Loop principal do escalonador
     while (i < n || running > 0 || !is_queue_empty(finished_threads) || !all_queues_empty) {
-        // Adiciona processos que chegaram agora a fila de prontos
         pthread_mutex_lock(&lock);
+        // Gerencia processos que chegaram agora
         while (i < n && time >= processes[i]->t0) {
-            pthread_t thread;
+            // Seleciona o core com menos carga e atribui valores a variaveis relacionadas
             core_i = laziest_core();
             core_dt[core_i] += processes[i]->dt;
             processes[i]->core_id = core_i;
             processes[i]->remaining = processes[i]->dt;
-
+            
+            // Criação da thread e atribuição ao core
+            pthread_t thread;
             pthread_create(&thread, NULL, execute, processes[i]);
             pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
             
-            // Ao chegar um processo, decide se havera preempcao
+            // Decide se haverá preempção, baseado no tempo restante do processo rodando no core
             if (active_threads[core_i] != NULL && processes[i]->dt < active_threads[core_i]->remaining) {
+                // Preempção, processo rodando volta pra fila e o que chegou roda
                 pq_push((pq_array[core_i]), active_threads[core_i]);
                 active_threads[core_i] = processes[i];
                 preemptions++;
             }
-            else{
+            else {
+                // Sem preempção, processo que chegou vai pra fila
                 pq_push((pq_array[core_i]), processes[i]);
             }
             
-            i++;
+            i++; // Passa para o próximo processo do vetor inicial
         }
 
+        // Verifica se algum core está sem thread rodando, com fila de prontos não vazia
         for (int i = 0; i < MAX_CORES; i++) {
             if (active_threads[i] == NULL && !is_pq_empty(pq_array[i])) {
+                // Põe o próximo da fila do núcleo para rodar
                 Process* candidate = top(pq_array[i]);
                 pq_pop(pq_array[i]);
                 active_threads[i] = candidate;
                 running++;
             }
         }
-
         pthread_mutex_unlock(&lock);
         
         // Espera todas as threads acabarem o ciclo
@@ -433,8 +470,9 @@ void srtn(FILE *file, Process **processes, int n) {
         threads_ready = 0;
         pthread_mutex_unlock(&lock);
         
-        time++;
+        time++; // Tempo que as threads gastaram acima
 
+        // Caso algum processo tenha finalizado, o imprime na formatação correta
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
@@ -445,6 +483,7 @@ void srtn(FILE *file, Process **processes, int n) {
         }
         pthread_mutex_unlock(&lock);
         
+        // Verifica se alguma das filas de pronto não está vazia
         all_queues_empty = 1;
         for (int i = 0; i < MAX_CORES; i++) {
             if (!is_pq_empty(pq_array[i]) || active_threads[i] != NULL) {
@@ -454,42 +493,53 @@ void srtn(FILE *file, Process **processes, int n) {
         }
     }
 
+    // Imprime a quantidade de preempções ocorridas
     fprintf(file, "%d\n", preemptions);
 }
 
+// Escalonador 3: Escalonamento por Prioridade
 void priority(FILE *file, Process **processes, int n) {
+    // Vetor de filas
+    // Cada fila é a fila de prontos de um dado núcleo, sem ordenação específica
     Queue *queues[MAX_CORES];
     for (int i = 0; i < MAX_CORES; i++) queues[i] = new_queue(sizeof(Process*));
 
-    int time = 0;
-    int core_i = 0;
-    int i = 0;
+    // Inicializa variaveis de controle do escalonador
+    int time = 0;             // Tempo da simulacao
+    int core_i = 0;           // Indice relativo ao core ao qual um processo sera atribuido
+    int i = 0;                // Indice atual do vetor de processos
+    int preemptions = 0;      // Conta quantas preempcoes houveram
+    int all_queues_empty = 0; // Indica se todas as filas de pronto estao vazias
     threads_ready = 0;
 
-    int preemptions = 0;
-    int all_queues_empty = 0;
-
+    // Loop principal do escalonador
     while (i < n || running > 0 || !is_queue_empty(finished_threads) || !all_queues_empty) {
-        // Adiciona processos que chegaram agora a fila de prontos
         pthread_mutex_lock(&lock);
+        // Gerencia processos que chegaram agora
         while (i < n && time >= processes[i]->t0) {
-            pthread_t thread;
+            // Seleciona o core com menos carga e atribui valores a variaveis relacionadas
             core_i = laziest_core();
             core_dt[core_i] += processes[i]->dt;
             processes[i]->core_id = core_i;
             processes[i]->remaining = processes[i]->dt;
-            processes[i]->quantum = calculate_quantum(processes[i]);
 
+            // Quantum calculado de modo a tentar cumprir a deadline
+            processes[i]->quantum = calculate_quantum(processes[i]);
+            
+            // Criação da thread e atribuição ao core
+            pthread_t thread;
             pthread_create(&thread, NULL, execute, processes[i]);
             pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
 
+            // Adiciona o processo à fila do core correspondente
             enqueue(queues[core_i], processes[i]);
-            
-            i++;
+            i++; // Passa para o próximo processo do vetor inicial
         }
 
+        // Verifica se algum core está sem thread rodando, com fila de prontos não vazia
         for (int i = 0; i < MAX_CORES; i++) {
             if (active_threads[i] == NULL && !is_queue_empty(queues[i])) {
+                // Põe o próximo da fila do núcleo para rodar
                 Process* candidate = front(queues[i]);
                 candidate->remaining = candidate->quantum;
                 active_threads[i] = candidate;
@@ -499,8 +549,11 @@ void priority(FILE *file, Process **processes, int n) {
             }
         }
 
+        // Verifica se o quantum de alguma das threads rodando acabou
         for (int i = 0; i < MAX_CORES; i++) {
             if (!is_queue_empty(queues[i]) && active_threads[i] != NULL && active_threads[i]->remaining <= 0) {
+                // Fim do quantum: processo rodando volta para a fila e o próximo da fila roda
+                // Ocorrência de preempção
                 enqueue(queues[i], active_threads[i]);
                 Process* candidate = front(queues[i]);
                 active_threads[i] = candidate;
@@ -509,7 +562,6 @@ void priority(FILE *file, Process **processes, int n) {
                 preemptions++;
             }
         }
-
         pthread_mutex_unlock(&lock);
         
         // Espera todas as threads acabarem o ciclo
@@ -521,8 +573,9 @@ void priority(FILE *file, Process **processes, int n) {
         threads_ready = 0;
         pthread_mutex_unlock(&lock);
         
-        time++;
+        time++; // Tempo que as threads gastaram acima
 
+        // Caso algum processo tenha finalizado, o imprime na formatação correta
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
@@ -532,7 +585,7 @@ void priority(FILE *file, Process **processes, int n) {
             dequeue(finished_threads);
         }
         pthread_mutex_unlock(&lock);
-        
+        // Verifica se alguma das filas de pronto não está vazia
         all_queues_empty = 1;
         for (int i = 0; i < MAX_CORES; i++) {
             if (!is_queue_empty(queues[i]) || active_threads[i] != NULL) {
@@ -542,6 +595,7 @@ void priority(FILE *file, Process **processes, int n) {
         }
     }
 
+    // Imprime a quantidade de preempções ocorridas
     fprintf(file, "%d\n", preemptions);
 }
 
@@ -585,7 +639,7 @@ int main(int argc, char *argv[]) {
         processes[i++] = line_to_process(line);
     }
 
-    fclose(file_in);
+    fclose(file_in); // Fecha o arquivo de entrada
 
     // Ordena os processos pela ordem do tempo de chegada
     qsort(processes, line_amount, sizeof(Process*), compare_by_t0);
@@ -609,7 +663,7 @@ int main(int argc, char *argv[]) {
             return 1;
     }
 
-    fclose(file_out);
+    fclose(file_out); // Fecha o arquivo de saída
 
     return 0;
 }
