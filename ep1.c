@@ -233,7 +233,6 @@ int compare_by_dt(const void *a, const void *b) {
 /******************************************************************
  ************************ PROCESSOS/THREADS ***********************/
 int MAX_CORES;
-char** active_names;
 Process** active_threads;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -244,32 +243,6 @@ int* core_dt;
 
 int running = 0;
 int threads_ready = 0;
-
-int is_active_thread(char *name) {
-    for (int i = 0; i < MAX_CORES; i++) {
-        if (active_names[i] && !strcmp(active_names[i], name))
-            return 1;
-    }
-    return 0;
-}
-
-void set_active_thread(char *name) {
-    for (int i = 0; i < MAX_CORES; i++) {
-        if (active_names[i] == NULL) {
-            active_names[i] = name;
-            return;
-        }
-    }
-}
-
-void remove_active_thread(char *name) {
-    for (int i = 0; i < MAX_CORES; i++) {
-        if (active_names[i] && !strcmp(active_names[i], name)) {
-            active_names[i] = NULL;
-            return;
-        }
-    }
-}
 
 int laziest_core() {
     int smallest_dt = 10000;
@@ -299,7 +272,7 @@ void* execute(void* arg) {
 
     while (time < time_lim) {
         pthread_mutex_lock(&lock);
-        while (!is_active_thread(p->name)) {
+        while (p != active_threads[p->core_id]) {
             pthread_cond_wait(&thread_cond, &lock);
         }
         pthread_mutex_unlock(&lock);
@@ -325,11 +298,8 @@ void* execute(void* arg) {
     // A thread acabou
     pthread_mutex_lock(&lock);
     enqueue(finished_threads, p);
-    // remove_active_thread(p->name);
-    active_names[p->core_id] = NULL;
     active_threads[p->core_id] = NULL;
     running--;
-    // core_dt[p->core_id] -= p->dt;
     pthread_cond_signal(&scheduler_cond);
     pthread_mutex_unlock(&lock);
 
@@ -347,7 +317,6 @@ int calculate_quantum(Process* p) {
 
 void fcfs(FILE *file, Process **processes, int n) {
     Queue *q = new_queue(sizeof(Process*));
-    finished_threads = new_queue(sizeof(Process*));
 
     int time = 0;
     int core_i = 0;
@@ -366,12 +335,12 @@ void fcfs(FILE *file, Process **processes, int n) {
         while (running < MAX_CORES && !is_queue_empty(q)) {
             pthread_t thread;
             Process *candidate = front(q);
-            set_active_thread(candidate->name);
 
             core_i = laziest_core();
             core_dt[core_i] += candidate->dt;
             candidate->core_id = core_i;
             candidate->remaining = candidate->dt;
+            active_threads[core_i] = candidate;
 
             pthread_create(&thread, NULL, execute, candidate);
             pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cores[core_i]);
@@ -390,17 +359,17 @@ void fcfs(FILE *file, Process **processes, int n) {
         threads_ready = 0;
         pthread_mutex_unlock(&lock);
         
+        time++;
+
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
-            int tr = time - p->t0 + 1;
-            int on_time = (time + 1 <= p->deadline);
-            fprintf(file, "%s %d %d %d\n", p->name, tr, time + 1, on_time);
+            int tr = time - p->t0;
+            int on_time = (time <= p->deadline);
+            fprintf(file, "%s %d %d %d\n", p->name, tr, time, on_time);
             dequeue(finished_threads);
         }
         pthread_mutex_unlock(&lock);
-
-        time++;
     }
 
     fprintf(file, "0\n");
@@ -409,8 +378,6 @@ void fcfs(FILE *file, Process **processes, int n) {
 void srtn(FILE *file, Process **processes, int n) {
     MinPQ *pq_array[MAX_CORES];
     for (int i = 0; i < MAX_CORES; i++) pq_array[i] = new_pq(8, compare_by_dt);
-
-    finished_threads = new_queue(sizeof(Process*));
 
     int time = 0;
     int core_i = 0;
@@ -435,7 +402,6 @@ void srtn(FILE *file, Process **processes, int n) {
             
             // Ao chegar um processo, decide se havera preempcao
             if (active_threads[core_i] != NULL && processes[i]->dt < active_threads[core_i]->remaining) {
-                active_names[core_i] = processes[i]->name;
                 pq_push((pq_array[core_i]), active_threads[core_i]);
                 active_threads[core_i] = processes[i];
                 preemptions++;
@@ -451,7 +417,6 @@ void srtn(FILE *file, Process **processes, int n) {
             if (active_threads[i] == NULL && !is_pq_empty(pq_array[i])) {
                 Process* candidate = top(pq_array[i]);
                 pq_pop(pq_array[i]);
-                active_names[i] = candidate->name;
                 active_threads[i] = candidate;
                 running++;
             }
@@ -468,17 +433,17 @@ void srtn(FILE *file, Process **processes, int n) {
         threads_ready = 0;
         pthread_mutex_unlock(&lock);
         
+        time++;
+
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
-            int tr = time - p->t0 + 1;
-            int on_time = (time + 1 <= p->deadline);
-            fprintf(file, "%s %d %d %d\n", p->name, tr, time + 1, on_time);
+            int tr = time - p->t0;
+            int on_time = (time <= p->deadline);
+            fprintf(file, "%s %d %d %d\n", p->name, tr, time, on_time);
             dequeue(finished_threads);
         }
         pthread_mutex_unlock(&lock);
-
-        time++;
         
         all_queues_empty = 1;
         for (int i = 0; i < MAX_CORES; i++) {
@@ -495,8 +460,6 @@ void srtn(FILE *file, Process **processes, int n) {
 void priority(FILE *file, Process **processes, int n) {
     Queue *queues[MAX_CORES];
     for (int i = 0; i < MAX_CORES; i++) queues[i] = new_queue(sizeof(Process*));
-
-    finished_threads = new_queue(sizeof(Process));
 
     int time = 0;
     int core_i = 0;
@@ -529,7 +492,6 @@ void priority(FILE *file, Process **processes, int n) {
             if (active_threads[i] == NULL && !is_queue_empty(queues[i])) {
                 Process* candidate = front(queues[i]);
                 candidate->remaining = candidate->quantum;
-                active_names[i] = candidate->name;
                 active_threads[i] = candidate;
                 
                 dequeue(queues[i]);
@@ -542,7 +504,6 @@ void priority(FILE *file, Process **processes, int n) {
                 enqueue(queues[i], active_threads[i]);
                 Process* candidate = front(queues[i]);
                 active_threads[i] = candidate;
-                active_names[i] = candidate->name;
                 candidate->remaining = candidate->quantum;
                 dequeue(queues[i]);
                 preemptions++;
@@ -560,17 +521,17 @@ void priority(FILE *file, Process **processes, int n) {
         threads_ready = 0;
         pthread_mutex_unlock(&lock);
         
+        time++;
+
         pthread_mutex_lock(&lock);
         while (!is_queue_empty(finished_threads)) {
             Process* p = front(finished_threads);
-            int tr = time - p->t0 + 1;
-            int on_time = (time + 1 <= p->deadline);
-            fprintf(file, "%s %d %d %d\n", p->name, tr, time + 1, on_time);
+            int tr = time - p->t0;
+            int on_time = (time <= p->deadline);
+            fprintf(file, "%s %d %d %d\n", p->name, tr, time, on_time);
             dequeue(finished_threads);
         }
         pthread_mutex_unlock(&lock);
-
-        time++;
         
         all_queues_empty = 1;
         for (int i = 0; i < MAX_CORES; i++) {
@@ -588,45 +549,50 @@ void priority(FILE *file, Process **processes, int n) {
 *************************** FUNÇÃO MAIN **************************/
 int main(int argc, char *argv[]) {
 
+    // Descobre o numero de cores, e inicializa vetores que dependem disso
     MAX_CORES = sysconf(_SC_NPROCESSORS_ONLN);
-    // MAX_CORES = 1;
-    active_names = malloc(MAX_CORES * sizeof(char*));
-    active_threads = malloc(MAX_CORES * sizeof(Process*));
-    cores = malloc(MAX_CORES * sizeof(cpu_set_t));
-    core_dt = malloc(MAX_CORES * sizeof(int));
-
+    active_threads = malloc(MAX_CORES * sizeof(Process*)); // Ponteiros para as threads ativas de cada core
+    cores = malloc(MAX_CORES * sizeof(cpu_set_t));         // Referencias aos cores
+    core_dt = malloc(MAX_CORES * sizeof(int));             // Soma dos tempos restantes das threads de cada core
+    finished_threads = new_queue(sizeof(Process*));        // Guarda threads que acabaram para serem imprimidas
+    
+    // Preenche os vetores corretamente
+    for (int i = 0; i < MAX_CORES; i++) {
+        active_threads[i] = NULL;
+        core_dt[i] = 0;
+        CPU_ZERO(&cores[i]);
+        CPU_SET(i, &cores[i]);
+    }
+    
+    // Erro (quantidade de argumentos errada)
     if (argc != 4) {
         printf("Uso correto: ep1 <numero do escalonador> <trace entrada> <trace saida>\n");
         return 1;
     }
 
-    FILE *file_in = fopen(argv[2], "r");
+    // Conta quantas linhas o arquivo de entrada tem
+    FILE *file_in = fopen(argv[2], "r"); // argv[2] == arquivo de entrada
     int line_amount = count_lines(file_in);
     fseek(file_in, 0, SEEK_SET);
 
+    // Reserva espaco para vetor de processos
     Process **processes = malloc(line_amount * sizeof(Process*));
     char *line = malloc(MAX_LINE_SIZE * sizeof(char));
 
+    // Preenche vetor de processos lendo do arquivo
     int i = 0;
     while (fgets(line, MAX_LINE_SIZE, file_in)) {
         processes[i++] = line_to_process(line);
     }
 
     fclose(file_in);
+
+    // Ordena os processos pela ordem do tempo de chegada
     qsort(processes, line_amount, sizeof(Process*), compare_by_t0);
 
-    FILE *file_out = fopen(argv[3], "a");
+    FILE *file_out = fopen(argv[3], "a"); // argv[3] == arquivo de saida
 
-    for (int i = 0; i < MAX_CORES; i++) active_names[i] = NULL;
-    for (int i = 0; i < MAX_CORES; i++) active_threads[i] = NULL;
-
-    for (int i = 0; i < MAX_CORES; i++) {
-        active_names[i] = NULL;
-        core_dt[i] = 0;
-        CPU_ZERO(&cores[i]);
-        CPU_SET(i, &cores[i]);
-    }
-
+    // De acordo com o tipo de escalonador selecionado, inicia a execucao
     int scheduler_mode = atoi(argv[1]);
     switch (scheduler_mode) {
         case 1:
