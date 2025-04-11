@@ -13,8 +13,9 @@
 ***************************** DEFINES ****************************/
 #define MAX_LINE_SIZE 128 // Tamanho maximo de uma linha do arquivo de entrada
 #define TIME_WORKING 1    // Tempo em segundos pelo qual um processo deve trabalhar, a cada segundo
-#define min(a,b) a < b ? a : b
-#define max(a,b) a > b ? a : b
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#define min(a,b) ((a) < (b) ? (a) : (b))
+
 
 /******************************************************************
 *********************** IMPLEMENTAÇÃO QUEUE ***********************/
@@ -296,6 +297,7 @@ void* execute(void* arg) {
         pthread_mutex_lock(&lock);
         core_dt[p->core_id]--;
         p->remaining--;
+        p->quantum--;
         time++;
         if (time < p->dt) threads_ready++;
         
@@ -328,8 +330,11 @@ void* execute(void* arg) {
 cpu_set_t* cores; // Vetor com referencias aos nucleos da maquina
 
 // Formula arbitraria para definir o quantum de um processo
-int calculate_quantum(Process* p) {
-    return max(1, ((p->dt * 4) / (p->deadline - p->t0)));
+int calculate_quantum(Process* p, int time) {
+    if (time + p->remaining >= p->deadline) return 1;
+
+    int urgency = (p->remaining * 10) / (p->deadline - time);
+    return max(1, urgency);
 }
 
 // Escalonador 1: FCFS
@@ -362,6 +367,7 @@ void fcfs(FILE *file, Process **processes, int n) {
             core_dt[core_i] += candidate->dt;
             candidate->core_id = core_i;
             candidate->remaining = candidate->dt;
+            candidate->quantum = candidate->dt;
             active_threads[core_i] = candidate;
             
             // Criação da thread e atribuição ao core
@@ -428,6 +434,7 @@ void srtn(FILE *file, Process **processes, int n) {
             core_dt[core_i] += processes[i]->dt;
             processes[i]->core_id = core_i;
             processes[i]->remaining = processes[i]->dt;
+            processes[i]->quantum = processes[i]->dt;
             
             // Criação da thread e atribuição ao core
             pthread_t thread;
@@ -522,9 +529,6 @@ void priority(FILE *file, Process **processes, int n) {
             core_dt[core_i] += processes[i]->dt;
             processes[i]->core_id = core_i;
             processes[i]->remaining = processes[i]->dt;
-
-            // Quantum calculado de modo a tentar cumprir a deadline
-            processes[i]->quantum = calculate_quantum(processes[i]);
             
             // Criação da thread e atribuição ao core
             pthread_t thread;
@@ -541,7 +545,7 @@ void priority(FILE *file, Process **processes, int n) {
             if (active_threads[i] == NULL && !is_queue_empty(queues[i])) {
                 // Põe o próximo da fila do núcleo para rodar
                 Process* candidate = front(queues[i]);
-                candidate->remaining = candidate->quantum;
+                candidate->quantum = calculate_quantum(candidate, time);
                 active_threads[i] = candidate;
                 
                 dequeue(queues[i]);
@@ -551,13 +555,13 @@ void priority(FILE *file, Process **processes, int n) {
 
         // Verifica se o quantum de alguma das threads rodando acabou
         for (int i = 0; i < MAX_CORES; i++) {
-            if (!is_queue_empty(queues[i]) && active_threads[i] != NULL && active_threads[i]->remaining <= 0) {
+            if (!is_queue_empty(queues[i]) && active_threads[i] != NULL && active_threads[i]->quantum <= 0) {
                 // Fim do quantum: processo rodando volta para a fila e o próximo da fila roda
                 // Ocorrência de preempção
                 enqueue(queues[i], active_threads[i]);
                 Process* candidate = front(queues[i]);
                 active_threads[i] = candidate;
-                candidate->remaining = candidate->quantum;
+                candidate->quantum = calculate_quantum(candidate, time);
                 dequeue(queues[i]);
                 preemptions++;
             }
