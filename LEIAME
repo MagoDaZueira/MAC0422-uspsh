@@ -1,0 +1,14 @@
+Neste EP, foram implementados um shell (uspsh) e um simulador de processos.
+
+Primeiramente, descompacte o .tar.gz.
+
+Para gerar os executáveis, no terminal, estando no mesmo diretório em que os arquivos estão, basta digitar make.
+Isso criará 2 executáveis. Para executá-los, faça deve-se realizar:
+
+./uspsh
+./ep1 <modo do escalonador (1, 2 ou 3)> <arquivo de entrada> <arquivo de saída>
+
+Note que os arquivos devem estar no mesmo diretório do executável "ep1".
+Ambos os executáveis podem ser executado utilizando o próprio uspsh, caso desejado.
+
+Os programas supõem que estão rodando num sistema GNU/Linux, e o uspsh requer que as bibliotecas "GNU readline" e "GNU history" estejam instaladas.
