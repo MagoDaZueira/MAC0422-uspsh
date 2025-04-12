@@ -164,6 +164,13 @@ int main() {
         if (input == NULL)
             break;
 
+        // Ignora entradas vazias ou apenas com espaços
+        if (strlen(input) == 0 || strspn(input, " \t\r\n") == strlen(input)) {
+            free(input);
+            free(prompt);
+            continue;
+        }
+
         // Guarda no histórico
         add_history(input);
 
