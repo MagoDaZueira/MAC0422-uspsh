@@ -8,28 +8,11 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/time.h>
-
-/******************************************************************
-***************************** DEFINES ****************************/
-#define MAX_LINE_SIZE 128 // Tamanho maximo de uma linha do arquivo de entrada
-#define TIME_WORKING 1    // Tempo em segundos pelo qual um processo deve trabalhar, a cada segundo
-#define max(a,b) ((a) > (b) ? (a) : (b))
-#define min(a,b) ((a) < (b) ? (a) : (b))
+#include "ep1.h"
 
 
 /******************************************************************
 *********************** IMPLEMENTAÇÃO QUEUE ***********************/
-typedef struct Node {
-    void *data;
-    struct Node *next;
-} Node;
-
-typedef struct {
-    Node *front;
-    Node *back;
-    int size;
-} Queue;
-
 Queue* new_queue() {
     Queue *q = (Queue*)malloc(sizeof(Queue));
     q->front = q->back = NULL;
@@ -75,20 +58,6 @@ void* front(Queue *q) {
 
 /******************************************************************
 *********************** IMPLEMENTAÇÃO HEAP ***********************/
-typedef int (*Comparator)(const void*, const void*);
-
-typedef struct {
-    void **pq;
-    int n;
-    int capacity;
-    Comparator cmp;
-} MinPQ;
-
-void swim(MinPQ* pq, int k);
-void sink(MinPQ* pq, int k);
-void swap(MinPQ* pq, int i, int j);
-void resize(MinPQ* pq, int capacity);
-
 MinPQ* new_pq(int init_capacity, Comparator cmp) {
     MinPQ *pq = (MinPQ*)malloc(sizeof(MinPQ));
     pq->n = 0;
@@ -160,16 +129,6 @@ void resize(MinPQ* pq, int capacity) {
 
 /******************************************************************
 ************************** UTILITÁRIOS ***************************/
-typedef struct Process {
-    char *name;     // Nome do processo
-    int t0;         // Tempo de chegada
-    int dt;         // Tempo de execucao
-    int remaining;  // Tempo restante (de um quantum ou da execucao total)
-    int deadline;   // Tempo limite ideal
-    int core_id;    // Nucleo ao qual a thread esta atribuida
-    int quantum;    // Intervalo de tempo alocado no escalonamento por prioridade
-} Process;
-
 // Conta as linhas de um arquivo
 int count_lines(FILE *file) {
     int count = 0;
