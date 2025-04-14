@@ -18,7 +18,6 @@ EXERCÍCIO-PROGRAMA: EP1
 #include <sys/wait.h>
 #include "uspsh.h"
 
-
 /******************************************************************
 ********************** GERENCIAMENTO DE INPUT ********************/
 
@@ -58,6 +57,7 @@ int count_args(char *str) {
         token = strtok(NULL, " ");
     }
 
+    free(token);
     return count;
 }
 
@@ -81,6 +81,7 @@ char **separate_args(char *input) {
     }
     args[i] = NULL;
 
+    free(token);
     return args;
 }
 

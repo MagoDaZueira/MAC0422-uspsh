@@ -12,10 +12,8 @@ EXERCÍCIO-PROGRAMA: EP1
 #include <unistd.h>
 #include <string.h>
 #include <pthread.h>
-#include <time.h>
 #include <sys/time.h>
 #include "ep1.h"
-
 
 /******************************************************************
 *********************** IMPLEMENTAÇÃO QUEUE ***********************/
@@ -297,7 +295,6 @@ cpu_set_t* cores; // Vetor com referencias aos nucleos da maquina
 // Formula arbitraria para definir o quantum de um processo
 int calculate_quantum(Process* p, int time) {
     if (time + p->remaining >= p->deadline) return 1;
-
     int urgency = (p->remaining * 10) / (p->deadline - time);
     return max(1, urgency);
 }
@@ -305,7 +302,7 @@ int calculate_quantum(Process* p, int time) {
 // Escalonador 1: FCFS
 void fcfs(FILE *file, Process **processes, int n) {
     // Fila de prontos compartilhada por todos os cores
-    Queue *ready = new_queue(sizeof(Process*));
+    Queue *ready = new_queue();
 
     // Inicializa variaveis de controle do escalonador
     int time = 0;   // Tempo da simulacao
@@ -474,7 +471,7 @@ void priority(FILE *file, Process **processes, int n) {
     // Vetor de filas
     // Cada fila é a fila de prontos de um dado núcleo, sem ordenação específica
     Queue *queues[MAX_CORES];
-    for (int i = 0; i < MAX_CORES; i++) queues[i] = new_queue(sizeof(Process*));
+    for (int i = 0; i < MAX_CORES; i++) queues[i] = new_queue();
 
     // Inicializa variaveis de controle do escalonador
     int time = 0;             // Tempo da simulacao
@@ -633,6 +630,13 @@ int main(int argc, char *argv[]) {
     }
 
     fclose(file_out); // Fecha o arquivo de saída
+
+    for (int i = 0; i < line_amount; i++) free(processes[i]);
+    free(processes);
+    free(active_threads);
+    free(finished_threads);
+    free(cores);
+    free(core_dt);
 
     return 0;
 }
